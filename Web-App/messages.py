@@ -5,12 +5,11 @@ import json
 
 from database import get_session
 from auth import get_current_user
-from models import Trip, TripMessage, TripParticipant
+from models import Trip, TripMessage
 import schemas
 
 router = APIRouter(prefix="/messages", tags=["messages"])
 
-# Хранилище активных WebSocket соединений
 active_connections = {}
 
 
@@ -23,7 +22,6 @@ def get_trip_messages(
         current_user=Depends(get_current_user)
 ):
     """Получить сообщения поездки"""
-    # Проверка, что пользователь является участником поездки
     trip = db.query(Trip).filter(Trip.id == trip_id).first()
     if not trip:
         raise HTTPException(
@@ -75,9 +73,11 @@ async def send_trip_message(
     db.commit()
     db.refresh(db_message)
 
+    # Отправка уведомления через WebSocket
     await notify_trip_participants(trip_id, db_message, db)
 
     return db_message
+
 
 @router.websocket("/ws/trip/{trip_id}")
 async def websocket_trip_chat(
@@ -143,4 +143,5 @@ async def broadcast_message(trip_id: int, message: dict):
 
 async def notify_trip_participants(trip_id: int, message: TripMessage, db: Session):
     """Уведомление участников о новом сообщении"""
+    # Здесь можно добавить отправку email/push уведомлений
     pass
