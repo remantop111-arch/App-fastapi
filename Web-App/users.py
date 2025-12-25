@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Optional
 import models, schemas
-from database import get_db
+from database import get_session
 
 router = APIRouter(prefix="/books", tags=["books"])
 
@@ -97,4 +97,5 @@ def delete_book(book_id: int, db: Session = Depends(get_db)):
     
     db.delete(db_book)
     db.commit()
+
     return None
