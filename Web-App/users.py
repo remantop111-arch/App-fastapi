@@ -1,103 +1,117 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Optional
-import models, schemas
+
 from database import get_session
+from auth import get_current_user, get_password_hash, require_role
+from models import User, UserRole
+import schemas
 
-router = APIRouter(prefix="/books", tags=["books"])
+router = APIRouter(prefix="/users", tags=["users"])
 
-# СОЗДАТЬ книгу
+
 @router.post("/", response_model=schemas.UserResponse, status_code=status.HTTP_201_CREATED)
-def create_book(
-    book: schemas.BookCreate,
-    db: Session = Depends(get_db),
-    # current_user будет позже, пока закомментируйте
-    # current_user: schemas.UserResponse = Depends(get_current_user)
-):
-    # Временно используем первого пользователя
-    first_user = db.query(models.User).first()
-    if not first_user:
-        # Создаем тестового пользователя
-        from auth import get_password_hash
-        first_user = models.User(
-            email="test@example.com",
-            username="testuser",
-            hashed_password=get_password_hash("password123"),
-            is_author=True
+def create_user(user: schemas.UserCreate, db: Session = Depends(get_session)):
+    """Регистрация нового пользователя"""
+
+    db_user = db.query(User).filter(User.email == user.email).first()
+    if db_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
         )
-        db.add(first_user)
-        db.commit()
-        db.refresh(first_user)
-    
-    db_book = models.Book(**book.dict(), author_id=first_user.id)
-    db.add(db_book)
+
+    db_user = db.query(User).filter(User.username == user.username).first()
+    if db_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username already taken"
+        )
+
+    hashed_password = get_password_hash(user.password)
+    db_user = User(
+        username=user.username,
+        email=user.email,
+        full_name=user.full_name,
+        bio=user.bio,
+        hashed_password=hashed_password,
+        role=UserRole.TRAVELER
+    )
+
+    db.add(db_user)
     db.commit()
-    db.refresh(db_book)
-    return db_book
+    db.refresh(db_user)
+    return db_user
 
-# ПОЛУЧИТЬ все книги
-@router.get("/", response_model=List[schemas.TripMessageWithAuthor])
-def get_books(
-    skip: int = 0,
-    limit: int = 100,
-    genre: Optional[str] = None,
-    db: Session = Depends(get_db)
+
+@router.get("/me", response_model=schemas.UserResponse)
+def read_current_user(current_user: User = Depends(get_current_user)):
+    """Получить информацию о текущем пользователе"""
+    return current_user
+
+
+@router.put("/me", response_model=schemas.UserResponse)
+def update_current_user(
+        user_update: schemas.UserUpdate,
+        db: Session = Depends(get_session),
+        current_user: User = Depends(get_current_user)
 ):
-    query = db.query(models.Book)
-    
-    if genre:
-        query = query.filter(models.Book.genre.ilike(f"%{genre}%"))
-    
-    books = query.offset(skip).limit(limit).all()
-    return books
+    """Обновить информацию о текущем пользователе"""
+    update_data = user_update.dict(exclude_unset=True)
 
-# ПОЛУЧИТЬ одну книгу
-@router.get("/{book_id}", response_model=schemas.TripMessageWithAuthor)
-def get_book(book_id: int, db: Session = Depends(get_db)):
-    book = db.query(models.Book).filter(models.Book.id == book_id).first()
-    if not book:
+    if "password" in update_data:
+        update_data["hashed_password"] = get_password_hash(update_data.pop("password"))
+
+    for key, value in update_data.items():
+        setattr(current_user, key, value)
+
+    db.commit()
+    db.refresh(current_user)
+    return current_user
+
+
+@router.get("/{user_id}", response_model=schemas.UserResponse)
+def read_user(user_id: int, db: Session = Depends(get_session)):
+    """Получить информацию о пользователе по ID"""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Book not found"
+            detail="User not found"
         )
-    return book
+    return user
 
-# ОБНОВИТЬ книгу
-@router.put("/{book_id}", response_model=schemas.UserResponse)
-def update_book(
-    book_id: int,
-    book_update: schemas.BookCreate,
-    db: Session = Depends(get_db)
+
+@router.get("/", response_model=List[schemas.UserResponse])
+def list_users(
+        skip: int = 0,
+        limit: int = 100,
+        role: Optional[UserRole] = None,
+        db: Session = Depends(get_session)
 ):
-    db_book = db.query(models.Book).filter(models.Book.id == book_id).first()
-    
-    if not db_book:
+    """Список пользователей с фильтрацией"""
+    query = db.query(User)
+
+    if role:
+        query = query.filter(User.role == role)
+
+    return query.offset(skip).limit(limit).all()
+
+
+@router.patch("/{user_id}/verify")
+def verify_user(
+        user_id: int,
+        db: Session = Depends(get_session),
+        admin: User = Depends(require_role("admin"))
+):
+    """Верификация пользователя (только для админа)"""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Book not found"
+            detail="User not found"
         )
-    
-    for key, value in book_update.dict(exclude_unset=True).items():
-        setattr(db_book, key, value)
-    
+
+    user.is_verified = True
     db.commit()
-    db.refresh(db_book)
-    return db_book
-
-# УДАЛИТЬ книгу
-@router.delete("/{book_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_book(book_id: int, db: Session = Depends(get_db)):
-    db_book = db.query(models.Book).filter(models.Book.id == book_id).first()
-    
-    if not db_book:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Book not found"
-        )
-    
-    db.delete(db_book)
-    db.commit()
-
-    return None
-
-
+    return {"message": "User verified successfully"}
