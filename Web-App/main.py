@@ -13,9 +13,15 @@ from auth import router as auth_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Управление жизненным циклом приложения"""
-    # Создание таблиц при старте (только если их нет)
-    Base.metadata.create_all(bind=engine, checkfirst=True)
-    print("Database tables checked/created")
+    # Пытаемся создать таблицы, игнорируем ошибку если они уже существуют
+    try:
+        Base.metadata.create_all(bind=engine)
+        print("✅ Database tables created")
+    except Exception as e:
+        if "already exists" in str(e):
+            print("✅ Database tables already exist")
+        else:
+            print(f"⚠️ Database error: {e}")
     
     yield
     
@@ -74,3 +80,4 @@ if __name__ == "__main__":
         reload=os.getenv("ENV") == "development"
 
     )
+
