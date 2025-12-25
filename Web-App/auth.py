@@ -1,119 +1,114 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
-from typing import List
+from jose import JWTError, jwt
+from datetime import datetime, timedelta
+from passlib.context import CryptContext
+import os
 
 from database import get_session
-from auth import get_current_user, get_password_hash, require_role
-from models import User, UserRole
-import schemas
+from models import User
 
-router = APIRouter(prefix="/users", tags=["users"])
+# Настройки
+SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-
-@router.post("/", response_model=schemas.UserResponse, status_code=status.HTTP_201_CREATED)
-def create_user(user: schemas.UserCreate, db: Session = Depends(get_session)):
-    """Регистрация нового пользователя"""
-    # Проверка существующего email
-    db_user = db.query(User).filter(User.email == user.email).first()
-    if db_user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already registered"
-        )
-
-    # Проверка существующего username
-    db_user = db.query(User).filter(User.username == user.username).first()
-    if db_user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Username already taken"
-        )
-
-    # Создание пользователя
-    hashed_password = get_password_hash(user.password)
-    db_user = User(
-        username=user.username,
-        email=user.email,
-        full_name=user.full_name,
-        bio=user.bio,
-        hashed_password=hashed_password,
-        role=UserRole.TRAVELER
-    )
-
-    db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
-    return db_user
+# Инициализация
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/v1/auth/login")
 
 
-@router.get("/me", response_model=schemas.UserResponse)
-def read_current_user(current_user: User = Depends(get_current_user)):
-    """Получить информацию о текущем пользователе"""
-    return current_user
+# Хеширование пароля
+def get_password_hash(password):
+    return pwd_context.hash(password)
 
 
-@router.put("/me", response_model=schemas.UserResponse)
-def update_current_user(
-        user_update: schemas.UserUpdate,
-        db: Session = Depends(get_session),
-        current_user: User = Depends(get_current_user)
+# Проверка пароля
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+# Создание токена
+def create_access_token(data: dict, expires_delta: timedelta = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+
+# Получение текущего пользователя
+async def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_session)
 ):
-    """Обновить информацию о текущем пользователе"""
-    update_data = user_update.dict(exclude_unset=True)
-
-    if "password" in update_data:
-        update_data["hashed_password"] = get_password_hash(update_data.pop("password"))
-
-    for key, value in update_data.items():
-        setattr(current_user, key, value)
-
-    db.commit()
-    db.refresh(current_user)
-    return current_user
-
-
-@router.get("/{user_id}", response_model=schemas.UserResponse)
-def read_user(user_id: int, db: Session = Depends(get_session)):
-    """Получить информацию о пользователе по ID"""
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: int = payload.get("sub")
+        if user_id is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    
     user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
+    if user is None:
+        raise credentials_exception
+    
     return user
 
 
-@router.get("/", response_model=List[schemas.UserResponse])
-def list_users(
-        skip: int = 0,
-        limit: int = 100,
-        role: Optional[UserRole] = None,
-        db: Session = Depends(get_session)
-):
-    """Список пользователей с фильтрацией"""
-    query = db.query(User)
-
-    if role:
-        query = query.filter(User.role == role)
-
-    return query.offset(skip).limit(limit).all()
+# Проверка роли пользователя
+def require_role(required_role: str):
+    def role_checker(current_user: User = Depends(get_current_user)):
+        if current_user.role.value != required_role:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Requires {required_role} role"
+            )
+        return current_user
+    return role_checker
 
 
-@router.patch("/{user_id}/verify")
-def verify_user(
-        user_id: int,
-        db: Session = Depends(get_session),
-        admin: User = Depends(require_role("admin"))
-):
-    """Верификация пользователя (только для админа)"""
+# WebSocket версия получения пользователя
+async def get_current_user_ws(token: str, db: Session):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: int = payload.get("sub")
+        if user_id is None:
+            return None
+    except JWTError:
+        return None
+    
     user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
+    return user
 
-    user.is_verified = True
-    db.commit()
-    return {"message": "User verified successfully"}
+
+# Роутер для аутентификации
+from fastapi import APIRouter
+
+router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+@router.post("/login")
+def login():
+    """Эндпоинт для входа пользователя"""
+    # Здесь должна быть логика входа
+    return {"message": "Login endpoint - implement logic here"}
+
+
+@router.post("/register")
+def register():
+    """Эндпоинт для регистрации пользователя"""
+    # Здесь должна быть логика регистрации
+    return {"message": "Register endpoint - implement logic here"}

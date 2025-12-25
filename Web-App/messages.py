@@ -5,12 +5,11 @@ import json
 
 from database import get_session
 from auth import get_current_user
-from models import Trip, TripMessage, TripParticipant
+from models import Trip, TripMessage
 import schemas
 
 router = APIRouter(prefix="/messages", tags=["messages"])
 
-# Хранилище активных WebSocket соединений
 active_connections = {}
 
 
@@ -23,7 +22,6 @@ def get_trip_messages(
         current_user=Depends(get_current_user)
 ):
     """Получить сообщения поездки"""
-    # Проверка, что пользователь является участником поездки
     trip = db.query(Trip).filter(Trip.id == trip_id).first()
     if not trip:
         raise HTTPException(
@@ -45,7 +43,7 @@ def get_trip_messages(
 
 
 @router.post("/trip/{trip_id}", response_model=schemas.TripMessageResponse)
-def send_trip_message(
+async def send_trip_message(
         trip_id: int,
         message: schemas.TripMessageCreate,
         db: Session = Depends(get_session),
